@@ -39,8 +39,41 @@ since CamelMailer has no equivalent for those.
 
 ## Install
 
-Download a binary from the [releases](https://github.com/camelmailer/camelmailer-migrate/releases),
-or build from source (needs a recent Rust toolchain):
+Pick one. None of these need you to clone this repository.
+
+### Docker (no install)
+
+Runs the published multi-arch image straight from GHCR. Use `--network host`
+so it can reach your Postal database and the target:
+
+```bash
+docker run --rm --network host ghcr.io/camelmailer/camelmailer-migrate \
+  --postal-db mysql://postal:password@127.0.0.1:3306/postal \
+  --target https://app.camelmailer.com \
+  --api-key "$CAMELMAILER_API_KEY" \
+  --org acme \
+  --dry-run
+```
+
+### Debian / Ubuntu (.deb)
+
+Native amd64/arm64 packages from the
+[releases page](https://github.com/camelmailer/camelmailer-migrate/releases):
+
+```bash
+sudo dpkg -i camelmailer-migrate_*.deb
+camelmailer-migrate --help
+```
+
+### Prebuilt binary
+
+Download and extract the archive for your platform from the
+[releases page](https://github.com/camelmailer/camelmailer-migrate/releases),
+then run `./camelmailer-migrate`.
+
+### From source
+
+Only if you want to build it yourself (needs a Rust toolchain):
 
 ```bash
 cargo install --git https://github.com/camelmailer/camelmailer-migrate

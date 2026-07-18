@@ -34,3 +34,19 @@ url = "2"
 [profile.release]
 strip = true
 lto = "thin"
+
+[package.metadata.deb]
+maintainer = "Michael Döhler <michaeldoehler@me.com>"
+copyright = "2026, CamelMailer"
+license-file = ["LICENSE", "0"]
+section = "mail"
+priority = "optional"
+extended-description = """\
+Migrate a Postal installation to CamelMailer. Reads Postal's database directly \
+and recreates its configuration (servers, domains with their DKIM keys, \
+credentials, webhooks, routes and IP pools) through the CamelMailer admin API, \
+against either the hosted cloud or a self-hosted install."""
+assets = [
+    ["target/release/camelmailer-migrate", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/camelmailer-migrate/README.md", "644"],
+]
