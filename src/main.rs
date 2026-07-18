@@ -199,7 +199,9 @@ fn print_plan(snap: &Snapshot, cli: &Cli) {
         .filter(|d| d.dkim_private_key.is_some())
         .count();
     if cli.no_dkim {
-        println!("\nDKIM keys will be regenerated (--no-dkim), so update the DKIM DNS record after.");
+        println!(
+            "\nDKIM keys will be regenerated (--no-dkim), so update the DKIM DNS record after."
+        );
     } else {
         println!(
             "\n{with_dkim} of {} domains carry a DKIM key that will be imported unchanged.",
@@ -210,7 +212,10 @@ fn print_plan(snap: &Snapshot, cli: &Cli) {
 
 fn confirm(target: &Target, cli: &Cli) -> Result<bool> {
     let where_to = match target.mode {
-        Mode::Cloud => format!("the cloud organization {:?}", cli.org.as_deref().unwrap_or("")),
+        Mode::Cloud => format!(
+            "the cloud organization {:?}",
+            cli.org.as_deref().unwrap_or("")
+        ),
         Mode::SelfHosted => match &cli.org {
             Some(org) => format!("organization {org:?}"),
             None => "organizations mirrored from Postal".to_string(),
@@ -282,9 +287,7 @@ async fn run(target: &Target, snap: &Snapshot, cli: &Cli) -> Result<()> {
             _ => "Live",
         };
         let proceed = stats.record(
-            target
-                .create_server(&org, &server.name, sp, mode)
-                .await,
+            target.create_server(&org, &server.name, sp, mode).await,
             &format!("server {sp}"),
         )?;
         if !proceed {
@@ -313,7 +316,9 @@ async fn run(target: &Target, snap: &Snapshot, cli: &Cli) -> Result<()> {
         stats.created, stats.skipped, stats.failed
     );
     if stats.failed > 0 {
-        println!("Some items failed; the messages above say why. Re-running skips what already exists.");
+        println!(
+            "Some items failed; the messages above say why. Re-running skips what already exists."
+        );
     }
     Ok(())
 }
@@ -333,14 +338,19 @@ async fn migrate_domains(
             d.dkim_private_key.as_deref()
         };
         let created = stats.record(
-            target.create_domain(org, &server.permalink, &d.name, dkim).await,
+            target
+                .create_domain(org, &server.permalink, &d.name, dkim)
+                .await,
             &format!("domain {}", d.name),
         )?;
         // Carry the verified state over so the domain is ready to send. Only
         // the self-hosted admin key may force-verify; on the cloud the domain
         // starts unverified and its DNS challenge must be published.
         if created && d.verified && target.mode == Mode::SelfHosted {
-            match target.force_verify_domain(org, &server.permalink, &d.name).await {
+            match target
+                .force_verify_domain(org, &server.permalink, &d.name)
+                .await
+            {
                 Ok(_) => println!("    \u{2713} verified {}", d.name),
                 Err(e) => println!("    \u{2717} could not verify {}: {e}", d.name),
             }
@@ -442,7 +452,8 @@ async fn migrate_routes(
         // the accept/hold/bounce/reject modes carry over directly. SMTP and
         // address endpoints have no CamelMailer equivalent.
         let (mode, endpoint_url): (&str, Option<String>) = match r.endpoint_type.as_deref() {
-            Some("HTTPEndpoint") => match r.endpoint_id.and_then(|id| snap.http_endpoints.get(&id)) {
+            Some("HTTPEndpoint") => match r.endpoint_id.and_then(|id| snap.http_endpoints.get(&id))
+            {
                 Some(url) => ("Endpoint", Some(url.clone())),
                 None => {
                     stats.note_skip(&label, "its HTTP endpoint could not be resolved");

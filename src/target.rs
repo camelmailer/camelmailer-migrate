@@ -74,8 +74,8 @@ pub struct Target {
 
 impl Target {
     pub fn new(target_url: &str, api_key: &str, mode_override: Option<Mode>) -> Result<Self> {
-        let url = Url::parse(target_url)
-            .with_context(|| format!("parsing target URL {target_url:?}"))?;
+        let url =
+            Url::parse(target_url).with_context(|| format!("parsing target URL {target_url:?}"))?;
         let host = url.host_str().unwrap_or_default().to_lowercase();
         let detected = if host == "camelmailer.com" || host.ends_with(".camelmailer.com") {
             Mode::Cloud
@@ -84,11 +84,7 @@ impl Target {
         };
         let mode = mode_override.unwrap_or(detected);
         // Normalize base: scheme://host[:port], no trailing slash or path.
-        let base = format!(
-            "{}://{}",
-            url.scheme(),
-            url.host_str().unwrap_or_default(),
-        );
+        let base = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default(),);
         let base = match url.port() {
             Some(port) => format!("{base}:{port}"),
             None => base,
@@ -105,7 +101,12 @@ impl Target {
         format!("{}/api/v2/admin{}", self.base, path)
     }
 
-    async fn send(&self, method: reqwest::Method, path: &str, body: Value) -> Result<Value, ApiErr> {
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Value,
+    ) -> Result<Value, ApiErr> {
         let mut req = self.http.request(method, self.url(path));
         req = match self.mode {
             Mode::Cloud => req.bearer_auth(&self.api_key),
