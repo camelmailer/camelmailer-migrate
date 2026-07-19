@@ -29,13 +29,49 @@ One target URL decides where it writes:
 | Webhooks | Webhooks | URL, signing, and the events CamelMailer supports |
 | Routes to HTTP endpoints | Routes | Endpoint URL and the accept / hold / bounce / reject modes |
 | IP pools and addresses | IP pools | Self-hosted targets only (installation-level) |
-
-Message history is **not** migrated. It lives in Postal's separate per-server
-databases and is left in place; keep the old Postal instance readable for as
-long as you need the archive.
+| Message history (opt-in) | Messages | With `--history`: past messages, their delivery attempts, opens and clicks, imported as completed records, never re-sent |
 
 Routes that forward to an SMTP or address endpoint are reported and skipped,
 since CamelMailer has no equivalent for those.
+
+### Message history
+
+By default only configuration is migrated. Pass `--history` to also bring
+across each server's past messages, read from Postal's separate per-server
+message databases (`{prefix}-server-{id}`). Messages are written through a
+non-sending import endpoint as completed records with their original
+timestamps, delivery outcomes, opens and clicks. **Nothing is ever
+re-delivered.**
+
+You decide how much of each message comes across with `--history-bodies`:
+
+- `full` (default): the complete raw message, headers and body, so "view
+  source" works.
+- `headers`: headers only, empty body. Smaller and faster.
+- `index`: no raw content; minimal headers (From, To, Subject, Message-ID)
+  are synthesized from the metadata so messages still list and search.
+
+```bash
+camelmailer-migrate \
+  --postal-db mysql://postal:password@127.0.0.1:3306/postal \
+  --target https://mail.example.com \
+  --api-key "$CAMELMAILER_ADMIN_API_KEY" \
+  --history --history-bodies full
+```
+
+History can be large. It is imported in batches (`--history-batch`, default
+200) after each server's configuration.
+
+### Choosing what to migrate
+
+Everything migrates by default. Use `--skip` to leave categories out
+(comma-separated): `domains`, `credentials`, `webhooks`, `routes`,
+`ip-pools`. History stays off unless you pass `--history`. For example, to
+move only servers and domains:
+
+```bash
+camelmailer-migrate ... --skip credentials,webhooks,routes,ip-pools
+```
 
 ## Install
 
@@ -139,6 +175,11 @@ they are ready to send right away.
 | `--server <permalink>` | Migrate only this one Postal server. |
 | `--mode <cloud\|self-hosted>` | Override the URL-based mode detection. |
 | `--no-dkim` | Generate fresh DKIM keys instead of importing Postal's. |
+| `--history` | Also migrate message history (off by default). |
+| `--history-bodies <full\|headers\|index>` | How message bodies come across (default `full`). |
+| `--message-db-prefix <prefix>` | Postal message-DB name prefix (default `postal`). |
+| `--history-batch <n>` | Messages per history import request (default 200). |
+| `--skip <categories>` | Leave categories out: `domains,credentials,webhooks,routes,ip-pools`. |
 | `--dry-run` | Read and plan only, write nothing. |
 | `-y`, `--yes` | Skip the confirmation prompt. |
 

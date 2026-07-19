@@ -9,6 +9,7 @@
 //! is the hosted cloud (bearer token, into one existing organization); any
 //! other host is a self-hosted install (admin key, full access).
 
+mod history;
 mod postal;
 mod target;
 
@@ -18,6 +19,7 @@ use std::io::{self, Write};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 
+use history::BodyMode;
 use postal::{Postal, Snapshot};
 use target::{field, ApiErr, Mode, Target};
 
@@ -77,6 +79,37 @@ struct Cli {
     /// Do not ask for confirmation before writing.
     #[arg(long, short = 'y')]
     yes: bool,
+
+    /// Also migrate message history (past messages and their delivery,
+    /// open and click events). Off by default because it can be large.
+    #[arg(long)]
+    history: bool,
+
+    /// How message bodies come across when importing history:
+    /// `full` (headers + body), `headers` (headers only), or `index`
+    /// (synthesize minimal headers, no body).
+    #[arg(long, default_value = "full")]
+    history_bodies: String,
+
+    /// Postal message-database name prefix; per-server databases are
+    /// `{prefix}-server-{id}`.
+    #[arg(long, default_value = "postal")]
+    message_db_prefix: String,
+
+    /// Messages sent per history import request.
+    #[arg(long, default_value_t = 200)]
+    history_batch: usize,
+
+    /// Config categories to leave out, comma-separated: any of
+    /// `domains`, `credentials`, `webhooks`, `routes`, `ip-pools`.
+    #[arg(long, value_delimiter = ',')]
+    skip: Vec<String>,
+}
+
+impl Cli {
+    fn skipped(&self, category: &str) -> bool {
+        self.skip.iter().any(|s| s.eq_ignore_ascii_case(category))
+    }
 }
 
 #[derive(Default)]
@@ -138,6 +171,11 @@ async fn main() -> Result<()> {
             "--org is required for a cloud target: cloud organizations already exist, so tell the \
              tool which one to migrate into (its permalink)."
         );
+    }
+
+    if cli.history {
+        // Fail fast on a bad body mode before touching either side.
+        BodyMode::parse(&cli.history_bodies)?;
     }
 
     // Read Postal first; this also validates the DB URL before we touch the
@@ -207,6 +245,15 @@ fn print_plan(snap: &Snapshot, cli: &Cli) {
             "\n{with_dkim} of {} domains carry a DKIM key that will be imported unchanged.",
             snap.domains.len()
         );
+    }
+    if cli.history {
+        println!(
+            "Message history: ON (bodies: {}); imported per server after its config.",
+            cli.history_bodies
+        );
+    }
+    if !cli.skip.is_empty() {
+        println!("Skipping categories: {}", cli.skip.join(", "));
     }
 }
 
@@ -295,15 +342,26 @@ async fn run(target: &Target, snap: &Snapshot, cli: &Cli) -> Result<()> {
             continue;
         }
 
-        migrate_domains(target, snap, cli, &mut stats, server, &org).await?;
-        migrate_credentials(target, snap, &mut stats, server, &org).await?;
-        migrate_webhooks(target, snap, &mut stats, server, &org).await?;
-        migrate_routes(target, snap, &mut stats, server, &org).await?;
+        if !cli.skipped("domains") {
+            migrate_domains(target, snap, cli, &mut stats, server, &org).await?;
+        }
+        if !cli.skipped("credentials") {
+            migrate_credentials(target, snap, &mut stats, server, &org).await?;
+        }
+        if !cli.skipped("webhooks") {
+            migrate_webhooks(target, snap, &mut stats, server, &org).await?;
+        }
+        if !cli.skipped("routes") {
+            migrate_routes(target, snap, &mut stats, server, &org).await?;
+        }
+        if cli.history {
+            migrate_history(target, cli, &mut stats, server, &org).await?;
+        }
     }
 
-    if target.mode == Mode::SelfHosted && cli.org.is_none() {
+    if target.mode == Mode::SelfHosted && cli.org.is_none() && !cli.skipped("ip-pools") {
         migrate_ip_pools(target, snap, &mut stats).await?;
-    } else if !snap.ip_pools.is_empty() {
+    } else if !snap.ip_pools.is_empty() && !cli.skipped("ip-pools") {
         println!(
             "\nIP pools are installation-level and were left out ({} in Postal); create them on a \
              self-hosted target without --org to include them.",
@@ -494,6 +552,61 @@ async fn migrate_routes(
             &label,
         )?;
     }
+    Ok(())
+}
+
+async fn migrate_history(
+    target: &Target,
+    cli: &Cli,
+    stats: &mut Stats,
+    server: &postal::Server,
+    org: &str,
+) -> Result<()> {
+    let mode = BodyMode::parse(&cli.history_bodies)?;
+    // The message data lives in a separate `{prefix}-server-{id}` database
+    // keyed by the Postal server id.
+    let pool = match history::connect(&cli.postal_db, &cli.message_db_prefix, server.id).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            println!("  \u{29b8} history: no message database for this server ({error}); skipped");
+            return Ok(());
+        }
+    };
+    let messages = match history::read_messages(&pool, mode).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            println!("  \u{2717} history: could not read messages: {error}");
+            return Ok(());
+        }
+    };
+    if messages.is_empty() {
+        println!("  history: no messages");
+        return Ok(());
+    }
+    let total = messages.len();
+    let mut imported = 0usize;
+    let mut failed = 0usize;
+    for chunk in messages.chunks(cli.history_batch.max(1)) {
+        match target.import_messages(org, &server.permalink, chunk).await {
+            Ok(data) => {
+                imported += data.get("imported").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                if let Some(list) = data.get("failed").and_then(|v| v.as_array()) {
+                    failed += list.len();
+                }
+            }
+            Err(error) if error.is_fatal() => {
+                bail!("history import authentication error: {error}")
+            }
+            Err(error) => {
+                failed += chunk.len();
+                println!("  \u{2717} history batch failed: {error}");
+            }
+        }
+        println!("  history: {}/{total} messages", imported + failed);
+    }
+    stats.created += imported as u32;
+    stats.failed += failed as u32;
+    println!("  history: {imported} imported, {failed} failed ({total} total)");
     Ok(())
 }
 

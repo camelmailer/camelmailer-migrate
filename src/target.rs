@@ -271,6 +271,21 @@ impl Target {
         .await
     }
 
+    /// Bulk-import historical messages (does not send). `messages` is a slice
+    /// of the import JSON objects prepared from the Postal message database.
+    pub async fn import_messages(
+        &self,
+        org: &str,
+        server: &str,
+        messages: &[Value],
+    ) -> Result<Value, ApiErr> {
+        self.post(
+            &format!("/organizations/{org}/servers/{server}/messages/import"),
+            json!({ "messages": messages }),
+        )
+        .await
+    }
+
     pub async fn create_ip_pool(&self, name: &str, default: bool) -> Result<Value, ApiErr> {
         self.post("/ip_pools", json!({ "name": name, "default": default }))
             .await
