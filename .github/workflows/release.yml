@@ -111,7 +111,10 @@ jobs:
       - name: Export digest
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          # Strip the `sha256:` prefix: a colon is not allowed in an
+          # upload-artifact file path. The manifest step adds it back.
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v4
         with:
           name: digests-${{ matrix.arch }}
@@ -148,10 +151,11 @@ jobs:
       - name: Create and push multi-arch tags
         working-directory: /tmp/digests
         run: |
-          # Digest filenames are the bare sha256:... values from each arch build.
+          # Digest filenames are the bare hex (sha256: prefix stripped on
+          # upload); add it back to reference each per-arch image by digest.
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.IMAGE }}@%s ' *)
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
       - name: Inspect
         run: |
           first_tag="$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
