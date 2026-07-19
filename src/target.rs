@@ -115,31 +115,7 @@ impl Target {
         if !body.is_null() {
             req = req.json(&body);
         }
-        let resp = req.send().await.map_err(|e| ApiErr {
-            http: 0,
-            code: String::new(),
-            message: format!("request failed: {e}"),
-        })?;
-        let http = resp.status().as_u16();
-        let value: Value = resp.json().await.unwrap_or(Value::Null);
-        let status = value.get("status").and_then(Value::as_str).unwrap_or("");
-        if (200..300).contains(&http) && status != "error" {
-            return Ok(value.get("data").cloned().unwrap_or(Value::Null));
-        }
-        let err = value.get("error");
-        Err(ApiErr {
-            http,
-            code: err
-                .and_then(|e| e.get("code"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            message: err
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("request was not successful")
-                .to_string(),
-        })
+        parse_response(req.send().await).await
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, ApiErr> {
@@ -209,19 +185,78 @@ impl Target {
         .await
     }
 
+    /// Create a credential. Pass `Some(key)` to preserve an existing key
+    /// (Postal, which exposes it) or `None` to have CamelMailer generate a
+    /// fresh one (the API sources, which cannot read a key back). The
+    /// generated key is returned in the response `data.credential.key`.
     pub async fn create_credential(
         &self,
         org: &str,
         server: &str,
         kind: &str,
         name: &str,
-        key: &str,
+        key: Option<&str>,
     ) -> Result<Value, ApiErr> {
+        let mut body = json!({ "type": kind, "name": name });
+        if let Some(key) = key {
+            body["key"] = json!(key);
+        }
         self.post(
             &format!("/organizations/{org}/servers/{server}/credentials"),
-            json!({ "type": kind, "name": name, "key": key }),
+            body,
         )
         .await
+    }
+
+    /// Add a server-wide suppression (honored before every send). `kind` is
+    /// the suppression type (`recipient`); `reason` is a free-text note.
+    pub async fn create_suppression(
+        &self,
+        org: &str,
+        server: &str,
+        address: &str,
+        kind: &str,
+        reason: Option<&str>,
+    ) -> Result<Value, ApiErr> {
+        let mut body = json!({ "address": address, "type": kind });
+        if let Some(reason) = reason {
+            body["reason"] = json!(reason);
+        }
+        self.post(
+            &format!("/organizations/{org}/servers/{server}/suppressions"),
+            body,
+        )
+        .await
+    }
+
+    /// Create a template through the server messaging API, authenticated with
+    /// a server API credential key (the admin API has no template-create
+    /// route). Used by the API sources after they mint a fresh credential.
+    pub async fn create_template(
+        &self,
+        server_api_key: &str,
+        name: &str,
+        permalink: &str,
+        subject: Option<&str>,
+        html_body: Option<&str>,
+        text_body: Option<&str>,
+    ) -> Result<Value, ApiErr> {
+        let mut body = json!({ "name": name, "permalink": permalink });
+        if let Some(subject) = subject {
+            body["subject"] = json!(subject);
+        }
+        if let Some(html) = html_body {
+            body["html_body"] = json!(html);
+        }
+        if let Some(text) = text_body {
+            body["text_body"] = json!(text);
+        }
+        let req = self
+            .http
+            .post(format!("{}/api/v2/server/templates", self.base))
+            .header("X-Server-API-Key", server_api_key)
+            .json(&body);
+        parse_response(req.send().await).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -304,6 +339,37 @@ impl Target {
         )
         .await
     }
+}
+
+/// Parse a CamelMailer API response envelope into `data` on success or a
+/// structured `ApiErr` otherwise. Shared by the admin API (`send`) and the
+/// server messaging API (template creation).
+async fn parse_response(resp: reqwest::Result<reqwest::Response>) -> Result<Value, ApiErr> {
+    let resp = resp.map_err(|e| ApiErr {
+        http: 0,
+        code: String::new(),
+        message: format!("request failed: {e}"),
+    })?;
+    let http = resp.status().as_u16();
+    let value: Value = resp.json().await.unwrap_or(Value::Null);
+    let status = value.get("status").and_then(Value::as_str).unwrap_or("");
+    if (200..300).contains(&http) && status != "error" {
+        return Ok(value.get("data").cloned().unwrap_or(Value::Null));
+    }
+    let err = value.get("error");
+    Err(ApiErr {
+        http,
+        code: err
+            .and_then(|e| e.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        message: err
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("request was not successful")
+            .to_string(),
+    })
 }
 
 /// Pull a string field out of a created-entity payload, trying the entity

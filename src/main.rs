@@ -1,9 +1,18 @@
-//! camelmailer-migrate: move a Postal installation to CamelMailer.
+//! camelmailer-migrate: move a Postal, Postmark, Resend, Mailgun or SendGrid
+//! account to CamelMailer.
 //!
-//! Reads Postal's database directly and recreates its configuration through
-//! the CamelMailer admin API: servers, domains (carrying their DKIM private
-//! keys over unchanged), API and SMTP credentials (keys preserved, so
-//! existing integrations keep working), webhooks, routes and IP pools.
+//! `--source postal` (the default) reads Postal's database directly and
+//! recreates its configuration through the CamelMailer admin API: servers,
+//! domains (carrying their DKIM private keys over unchanged), API and SMTP
+//! credentials (keys preserved, so existing integrations keep working),
+//! webhooks, routes and IP pools.
+//!
+//! The other four sources are read over each provider's HTTP API with
+//! `--source-api-key`. Those APIs deliberately do NOT expose existing sending
+//! API keys or DKIM private keys, so for an API source the tool creates a NEW
+//! CamelMailer credential (update your app) and a fresh per-domain DKIM key (a
+//! DNS change), and migrates what the API does expose: domains, suppressions,
+//! templates, routes and (with `--history`) message history.
 //!
 //! The target URL alone decides where it writes: a `*.camelmailer.com` host
 //! is the hosted cloud (bearer token, into one existing organization); any
@@ -11,6 +20,7 @@
 
 mod history;
 mod postal;
+mod sources;
 mod target;
 
 use std::collections::HashMap;
@@ -21,6 +31,7 @@ use clap::Parser;
 
 use history::BodyMode;
 use postal::{Postal, Snapshot};
+use sources::{ApiClient, ApiSnapshot, SourceKind};
 use target::{field, ApiErr, Mode, Target};
 
 /// The webhook events CamelMailer understands. Postal emits a wider set
@@ -36,12 +47,39 @@ const CM_EVENTS: [&str; 4] = [
 #[command(
     name = "camelmailer-migrate",
     version,
-    about = "Migrate a Postal installation to CamelMailer (cloud or self-hosted)."
+    about = "Migrate Postal, Postmark, Resend, Mailgun or SendGrid to CamelMailer (cloud or self-hosted)."
 )]
 struct Cli {
-    /// Postal database URL, e.g. mysql://user:pass@host:3306/postal
+    /// Where to read from: postal (default, reads the Postal database) or one
+    /// of the HTTP-API sources postmark | resend | mailgun | sendgrid.
+    #[arg(long, default_value = "postal")]
+    source: String,
+
+    /// Postal database URL, e.g. mysql://user:pass@host:3306/postal.
+    /// Required for `--source postal`.
     #[arg(long, env = "POSTAL_DATABASE_URL")]
-    postal_db: String,
+    postal_db: Option<String>,
+
+    /// API key for an API source (postmark | resend | mailgun | sendgrid).
+    /// For Postmark this is the account token; for Mailgun it is the private
+    /// API key (used as the HTTP-basic password).
+    #[arg(long, env = "SOURCE_API_KEY")]
+    source_api_key: Option<String>,
+
+    /// Region for a provider that has regional hosts. Mailgun: us (default) or
+    /// eu. Ignored by the others.
+    #[arg(long)]
+    source_region: Option<String>,
+
+    /// Override the source API base URL (for self-hosted or non-standard
+    /// provider hosts). Takes precedence over --source-region.
+    #[arg(long)]
+    source_base_url: Option<String>,
+
+    /// Name of the single CamelMailer server an API source migrates into.
+    /// Defaults to the provider name (e.g. "Postmark").
+    #[arg(long)]
+    server_name: Option<String>,
 
     /// CamelMailer base URL. A *.camelmailer.com host selects the cloud;
     /// anything else is treated as a self-hosted install.
@@ -100,8 +138,10 @@ struct Cli {
     #[arg(long, default_value_t = 200)]
     history_batch: usize,
 
-    /// Config categories to leave out, comma-separated: any of
-    /// `domains`, `credentials`, `webhooks`, `routes`, `ip-pools`.
+    /// Config categories to leave out, comma-separated. Postal: any of
+    /// `domains`, `credentials`, `webhooks`, `routes`, `ip-pools`. API
+    /// sources: `domains`, `credentials`, `suppressions`, `templates`,
+    /// `routes`.
     #[arg(long, value_delimiter = ',')]
     skip: Vec<String>,
 }
@@ -155,6 +195,7 @@ impl Stats {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let source = SourceKind::parse(&cli.source)?;
 
     let mode_override = match cli.mode.as_deref() {
         None => None,
@@ -178,10 +219,20 @@ async fn main() -> Result<()> {
         BodyMode::parse(&cli.history_bodies)?;
     }
 
+    if source.is_api() {
+        return run_api_source(&target, &cli, source).await;
+    }
+
+    // --- Postal (database) source ---
+    let postal_db = cli
+        .postal_db
+        .as_deref()
+        .context("--postal-db is required for --source postal (or set POSTAL_DATABASE_URL)")?;
+
     // Read Postal first; this also validates the DB URL before we touch the
     // target.
     println!("Reading Postal database ...");
-    let postal = Postal::connect(&cli.postal_db).await?;
+    let postal = Postal::connect(postal_db).await?;
     let mut snap = postal.read().await?;
     filter_snapshot(&mut snap, cli.server.as_deref());
     print_plan(&snap, &cli);
@@ -436,7 +487,7 @@ async fn migrate_credentials(
         };
         stats.record(
             target
-                .create_credential(org, &server.permalink, kind, &name, &c.key)
+                .create_credential(org, &server.permalink, kind, &name, Some(&c.key))
                 .await,
             &format!("{kind} credential {name:?} (key preserved)"),
         )?;
@@ -563,9 +614,13 @@ async fn migrate_history(
     org: &str,
 ) -> Result<()> {
     let mode = BodyMode::parse(&cli.history_bodies)?;
+    let postal_db = cli
+        .postal_db
+        .as_deref()
+        .context("--postal-db is required for history")?;
     // The message data lives in a separate `{prefix}-server-{id}` database
     // keyed by the Postal server id.
-    let pool = match history::connect(&cli.postal_db, &cli.message_db_prefix, server.id).await {
+    let pool = match history::connect(postal_db, &cli.message_db_prefix, server.id).await {
         Ok(pool) => pool,
         Err(error) => {
             println!("  \u{29b8} history: no message database for this server ({error}); skipped");
@@ -654,5 +709,327 @@ async fn migrate_ip_pools(target: &Target, snap: &Snapshot, stats: &mut Stats) -
             )?;
         }
     }
+    Ok(())
+}
+
+// ----------------------------------------------------------- API sources
+
+/// Migrate one HTTP-API source (Postmark, Resend, Mailgun, SendGrid) into a
+/// single CamelMailer server. Unlike the Postal path, sending keys and DKIM
+/// private keys cannot be read back over these APIs, so a fresh credential and
+/// per-domain DKIM key are created and the user updates their app and DNS.
+async fn run_api_source(target: &Target, cli: &Cli, source: SourceKind) -> Result<()> {
+    let api_key = cli.source_api_key.as_deref().with_context(|| {
+        format!(
+            "--source-api-key is required for --source {} (or set SOURCE_API_KEY)",
+            cli.source
+        )
+    })?;
+    let client = ApiClient::new(
+        source,
+        api_key,
+        cli.source_base_url.as_deref(),
+        cli.source_region.as_deref(),
+    )?;
+
+    let provider = source.provider_name();
+    println!("Reading {provider} ...");
+    let snap = client.snapshot().await?;
+    print_api_plan(&snap, cli, source);
+
+    if cli.dry_run {
+        if cli.history {
+            println!(
+                "Message history: ON (bodies: {}); read from the {provider} API after config.",
+                cli.history_bodies
+            );
+        }
+        println!("\nDry run: nothing was written.");
+        return Ok(());
+    }
+
+    if let Err(e) = target.check().await {
+        bail!("could not authenticate against {}: {e}", cli.target);
+    }
+    if !cli.yes && !confirm(target, cli)? {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    run_api(target, &client, cli, source, &snap).await
+}
+
+fn print_api_plan(snap: &ApiSnapshot, cli: &Cli, source: SourceKind) {
+    let provider = source.provider_name();
+    println!("\nFound in {provider}:");
+    println!("  domains       : {}", snap.domains.len());
+    println!("  suppressions  : {}", snap.suppressions.len());
+    println!("  templates     : {}", snap.templates.len());
+    if source == SourceKind::Mailgun {
+        println!("  routes        : {}", snap.routes.len());
+    }
+    println!(
+        "\nHeads up: {provider} does not expose existing sending API keys or DKIM private keys over \
+         its API. A NEW CamelMailer credential is created (update your app with it) and each domain \
+         gets a fresh CamelMailer DKIM key (publish its DNS record). Everything else above is \
+         migrated as-is."
+    );
+    for note in &snap.notes {
+        println!("  note: {note}");
+    }
+    if cli.history {
+        println!(
+            "Message history: ON (bodies: {}); read from the {provider} API after config.",
+            cli.history_bodies
+        );
+    }
+    if !cli.skip.is_empty() {
+        println!("Skipping categories: {}", cli.skip.join(", "));
+    }
+}
+
+async fn run_api(
+    target: &Target,
+    client: &ApiClient,
+    cli: &Cli,
+    source: SourceKind,
+    snap: &ApiSnapshot,
+) -> Result<()> {
+    let mut stats = Stats::default();
+
+    let server_name = cli
+        .server_name
+        .clone()
+        .unwrap_or_else(|| source.provider_name().to_string());
+    let server_permalink = sources::permalink(&server_name);
+
+    // Resolve the organization: on the cloud it must already exist (--org); on
+    // self-hosted use --org or create one from the server name.
+    let org = match (target.mode, &cli.org) {
+        (Mode::Cloud, Some(org)) => org.clone(),
+        (Mode::SelfHosted, Some(org)) => {
+            stats.record(
+                target.create_org(org, org).await,
+                &format!("organization {org}"),
+            )?;
+            org.clone()
+        }
+        (Mode::SelfHosted, None) => {
+            let permalink = sources::permalink(&server_name);
+            println!("\nOrganization {server_name:?}");
+            stats.record(
+                target.create_org(&server_name, &permalink).await,
+                &format!("organization {permalink}"),
+            )?;
+            permalink
+        }
+        (Mode::Cloud, None) => unreachable!("cloud requires --org, checked earlier"),
+    };
+
+    println!("\nServer {server_name:?} -> {org}/{server_permalink}");
+    let proceed = stats.record(
+        target
+            .create_server(&org, &server_name, &server_permalink, "Live")
+            .await,
+        &format!("server {server_permalink}"),
+    )?;
+    if !proceed {
+        println!("  (skipping this server's domains, credentials and history)");
+        return Ok(());
+    }
+
+    // Domains: a fresh DKIM key each (no key is readable over the API), so they
+    // start unverified and need a DNS change.
+    if !cli.skipped("domains") {
+        for d in &snap.domains {
+            let was = if d.verified {
+                " (verified at the source; still needs a fresh CamelMailer DKIM DNS record)"
+            } else {
+                " (unverified at the source)"
+            };
+            stats.record(
+                target
+                    .create_domain(&org, &server_permalink, &d.name, None)
+                    .await,
+                &format!("domain {}{was}", d.name),
+            )?;
+        }
+    }
+
+    // A fresh API credential. Capture the generated key so templates can be
+    // created through the server messaging API.
+    let mut server_api_key: Option<String> = None;
+    if !cli.skipped("credentials") {
+        let name = format!("{} migration key", source.provider_name());
+        match target
+            .create_credential(&org, &server_permalink, "API", &name, None)
+            .await
+        {
+            Ok(data) => {
+                println!("  \u{2713} API credential {name:?} (NEW key; update your app)");
+                stats.created += 1;
+                server_api_key = field(&data, "credential", "key").map(str::to_string);
+                if server_api_key.is_none() {
+                    println!("    note: could not read the new credential key from the response");
+                }
+            }
+            Err(e) if e.is_fatal() => bail!("authentication or permission error: {e}"),
+            Err(e) if e.is_conflict() => {
+                println!("  \u{29b8} API credential {name:?} (already present, skipped)");
+                stats.skipped += 1;
+            }
+            Err(e) => {
+                println!("  \u{2717} API credential {name:?}: {e}");
+                stats.failed += 1;
+            }
+        }
+    }
+
+    // Suppressions (server-wide), honored before every send.
+    if !cli.skipped("suppressions") && !snap.suppressions.is_empty() {
+        println!("\nSuppressions ({})", snap.suppressions.len());
+        for s in &snap.suppressions {
+            stats.record(
+                target
+                    .create_suppression(
+                        &org,
+                        &server_permalink,
+                        &s.address,
+                        "recipient",
+                        Some(&s.reason),
+                    )
+                    .await,
+                &format!("suppression {}", s.address),
+            )?;
+        }
+    }
+
+    // Templates, through the server messaging API (needs the fresh key).
+    if !cli.skipped("templates") && !snap.templates.is_empty() {
+        println!("\nTemplates ({})", snap.templates.len());
+        match &server_api_key {
+            Some(key) => {
+                for t in &snap.templates {
+                    stats.record(
+                        target
+                            .create_template(
+                                key,
+                                &t.name,
+                                &t.permalink,
+                                t.subject.as_deref(),
+                                t.html_body.as_deref(),
+                                t.text_body.as_deref(),
+                            )
+                            .await,
+                        &format!("template {:?}", t.name),
+                    )?;
+                }
+            }
+            None => stats.note_skip(
+                &format!("{} template(s)", snap.templates.len()),
+                "no server API key was available (credential step skipped or failed)",
+            ),
+        }
+    }
+
+    // Routes (Mailgun only).
+    if !cli.skipped("routes") && !snap.routes.is_empty() {
+        println!("\nRoutes ({})", snap.routes.len());
+        for r in &snap.routes {
+            stats.record(
+                target
+                    .create_route(
+                        &org,
+                        &server_permalink,
+                        &r.name,
+                        r.domain.as_deref(),
+                        &r.mode,
+                        r.endpoint_url.as_deref(),
+                    )
+                    .await,
+                &format!("route {:?}", r.name),
+            )?;
+        }
+    }
+
+    // Message history.
+    if cli.history {
+        migrate_api_history(
+            target,
+            client,
+            cli,
+            &mut stats,
+            &org,
+            &server_permalink,
+            snap,
+        )
+        .await?;
+    }
+
+    println!(
+        "\nDone. {} created, {} skipped, {} failed.",
+        stats.created, stats.skipped, stats.failed
+    );
+    if stats.failed > 0 {
+        println!(
+            "Some items failed; the messages above say why. Re-running skips what already exists."
+        );
+    }
+    println!(
+        "\nRemember to update your application with the new API credential and to publish each \
+         domain's fresh DKIM DNS record before you cut traffic over."
+    );
+    Ok(())
+}
+
+async fn migrate_api_history(
+    target: &Target,
+    client: &ApiClient,
+    cli: &Cli,
+    stats: &mut Stats,
+    org: &str,
+    server_permalink: &str,
+    snap: &ApiSnapshot,
+) -> Result<()> {
+    let mode = BodyMode::parse(&cli.history_bodies)?;
+    let domain_names: Vec<String> = snap.domains.iter().map(|d| d.name.clone()).collect();
+    let (messages, notes) = match client.history(&domain_names, mode).await {
+        Ok(result) => result,
+        Err(error) => {
+            println!("  \u{2717} history: could not read messages: {error}");
+            return Ok(());
+        }
+    };
+    for note in notes {
+        println!("  note: {note}");
+    }
+    if messages.is_empty() {
+        println!("  history: no messages");
+        return Ok(());
+    }
+    let total = messages.len();
+    let mut imported = 0usize;
+    let mut failed = 0usize;
+    for chunk in messages.chunks(cli.history_batch.max(1)) {
+        match target.import_messages(org, server_permalink, chunk).await {
+            Ok(data) => {
+                imported += data.get("imported").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                if let Some(list) = data.get("failed").and_then(|v| v.as_array()) {
+                    failed += list.len();
+                }
+            }
+            Err(error) if error.is_fatal() => {
+                bail!("history import authentication error: {error}")
+            }
+            Err(error) => {
+                failed += chunk.len();
+                println!("  \u{2717} history batch failed: {error}");
+            }
+        }
+        println!("  history: {}/{total} messages", imported + failed);
+    }
+    stats.created += imported as u32;
+    stats.failed += failed as u32;
+    println!("  history: {imported} imported, {failed} failed ({total} total)");
     Ok(())
 }
