@@ -1,0 +1,16 @@
+# Pin the toolchain so a local build and CI agree.
+#
+# The workflow installs `dtolnay/rust-toolchain@stable`, which follows
+# upstream's release schedule. On 2026-09-01 stable moved to 1.98.1 and
+# clippy's `needless_late_init` began firing on code that had not changed
+# since July, turning `main` red on its own. The product repo pinned for the
+# same reason (camelmailer#11); this keeps the two consistent.
+#
+# To move: bump `channel`, run `cargo fmt --all` and
+# `cargo clippy --all-targets -- -D warnings`, fix what the new release
+# flags, and ship it as its own change.
+#
+# This is not an MSRV declaration.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
