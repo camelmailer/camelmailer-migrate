@@ -162,24 +162,19 @@ async fn collect_templates(
         }
         // The list omits bodies; fetch the full template for subject/bodies.
         let detail_url = format!("{}/templates/{id}", client.base());
-        let subject;
-        let html;
-        let text;
-        match client
+        // A template whose detail fetch fails still migrates, without its
+        // bodies, so one bad template cannot abort the whole migration.
+        let (subject, html, text) = match client
             .get_json(&detail_url, Auth::Header(SERVER_HEADER, token))
             .await
         {
-            Ok(detail) => {
-                subject = str_field(&detail, "Subject");
-                html = str_field(&detail, "HtmlBody");
-                text = str_field(&detail, "TextBody");
-            }
-            Err(_) => {
-                subject = None;
-                html = None;
-                text = None;
-            }
-        }
+            Ok(detail) => (
+                str_field(&detail, "Subject"),
+                str_field(&detail, "HtmlBody"),
+                str_field(&detail, "TextBody"),
+            ),
+            Err(_) => (None, None, None),
+        };
         snap.templates.push(ApiTemplate {
             name,
             permalink: link,
