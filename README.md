@@ -3,12 +3,12 @@
 Move a [Postal](https://postalserver.io) installation, or a
 [Postmark](https://postmarkapp.com), [Resend](https://resend.com),
 [Mailgun](https://www.mailgun.com) or [SendGrid](https://sendgrid.com)
-account, to [CamelMailer](https://camelmailer.com) in one command. Pick the
+account, to [Camelmailer](https://camelmailer.com) in one command. Pick the
 source with `--source`; it defaults to `postal`, so the existing Postal
 behaviour is unchanged.
 
 For Postal it reads the database directly and recreates the configuration
-through the CamelMailer admin API, carrying over the things that usually make
+through the Camelmailer admin API, carrying over the things that usually make
 a mail migration painful: your **DKIM keys** and your **API and SMTP
 credential keys**. Because the keys are preserved, your existing DNS keeps
 validating and your existing integrations keep sending. No code change on
@@ -16,7 +16,7 @@ your side, and for self-hosted targets, no DKIM DNS change either.
 
 The four API sources are read over each provider's HTTP API instead. Those
 APIs deliberately do **not** expose existing sending API keys or DKIM private
-keys, so an API source creates a **new** CamelMailer credential (update your
+keys, so an API source creates a **new** Camelmailer credential (update your
 app) and a **fresh** per-domain DKIM key (a DNS change), and migrates what the
 API does expose. See [Other sources](#other-sources) below.
 
@@ -30,19 +30,19 @@ One target URL decides where it writes:
 
 ## What it migrates
 
-| Postal | CamelMailer | Notes |
+| Postal | Camelmailer | Notes |
 | --- | --- | --- |
 | Organizations | Organizations | Recreated on self-hosted; on the cloud you pick one existing org |
 | Mail servers | Servers | Name, permalink and mode (Live / Development) |
 | Domains | Domains | **DKIM private key imported unchanged**; verified state carried over on self-hosted |
 | API and SMTP credentials | Credentials | **Key value preserved**, so existing senders keep working |
-| Webhooks | Webhooks | URL, signing, and the events CamelMailer supports |
+| Webhooks | Webhooks | URL, signing, and the events Camelmailer supports |
 | Routes to HTTP endpoints | Routes | Endpoint URL and the accept / hold / bounce / reject modes |
 | IP pools and addresses | IP pools | Self-hosted targets only (installation-level) |
 | Message history (opt-in) | Messages | With `--history`: past messages, their delivery attempts, opens and clicks, imported as completed records, never re-sent |
 
 Routes that forward to an SMTP or address endpoint are reported and skipped,
-since CamelMailer has no equivalent for those.
+since Camelmailer has no equivalent for those.
 
 ### Message history
 
@@ -102,20 +102,20 @@ camelmailer-migrate \
 Everything runs through the same target: the URL still selects cloud vs
 self-hosted, and `--dry-run`, `--yes`, `--history`, `--history-bodies`,
 `--history-batch` and `--skip` all work the same way. An API source migrates
-into a single CamelMailer server (`--server-name`, default the provider name).
+into a single Camelmailer server (`--server-name`, default the provider name).
 
 > **API keys and DKIM are not portable over these APIs.** None of Postmark,
 > Resend, Mailgun or SendGrid lets you read back an existing sending API key
 > or a DKIM private key. So for an API source the tool creates a **new**
-> CamelMailer API credential (set it in your app) and each domain gets a
-> **fresh** CamelMailer DKIM key (publish its DNS record). Everything else is
+> Camelmailer API credential (set it in your app) and each domain gets a
+> **fresh** Camelmailer DKIM key (publish its DNS record). Everything else is
 > migrated as the provider's API exposes it.
 
 What each API source migrates:
 
 | Source | `--source-api-key` | Migrates | Notes |
 | --- | --- | --- | --- |
-| **Postmark** | Account token | Servers' domains and sender-signature domains, templates, suppressions (bounces and spam complaints), and outbound message history with `--history` | The account token discovers each server's token; templates, suppressions and history are read per server and folded into one CamelMailer server. |
+| **Postmark** | Account token | Servers' domains and sender-signature domains, templates, suppressions (bounces and spam complaints), and outbound message history with `--history` | The account token discovers each server's token; templates, suppressions and history are read per server and folded into one Camelmailer server. |
 | **Resend** | API key | Domains, unsubscribed audience contacts (as suppressions), and sent-email history with `--history` | Audiences and broadcasts have no admin create API, so they are reported for you to recreate as broadcast streams. No server-side templates API. |
 | **Mailgun** | Private API key | Domains, routes, suppressions (bounces, unsubscribes, complaints), templates, and message history (Events API) with `--history` | `--source-region eu` for the EU host, or `--source-base-url` for a custom host. Routes map forward to endpoint, store to accept, stop to reject. |
 | **SendGrid** | API key | Authenticated domains, dynamic templates, suppressions (bounces, blocks, spam reports, global and group unsubscribes), and Email Activity with `--history` | Email Activity needs the paid add-on; without it, history is skipped with a note. History carries metadata only, no bodies. |
@@ -196,7 +196,7 @@ camelmailer-migrate \
 ```
 
 On the cloud, domains are created but start unverified: publish the
-verification DNS record CamelMailer shows for each one. The DKIM key is still
+verification DNS record Camelmailer shows for each one. The DKIM key is still
 imported, so your reputation carries over.
 
 ### Self-hosted
@@ -224,8 +224,8 @@ they are ready to send right away.
 | `--source-api-key <key>` | API key for an API source. Also read from `SOURCE_API_KEY`. |
 | `--source-region <us\|eu>` | Regional host for a provider that has one (Mailgun). |
 | `--source-base-url <url>` | Override the source API base URL. Takes precedence over `--source-region`. |
-| `--server-name <name>` | Name of the single CamelMailer server an API source migrates into (default: the provider name). |
-| `--target <url>` | CamelMailer base URL. Its host selects cloud vs self-hosted. |
+| `--server-name <name>` | Name of the single Camelmailer server an API source migrates into (default: the provider name). |
+| `--target <url>` | Camelmailer base URL. Its host selects cloud vs self-hosted. |
 | `--api-key <key>` | Cloud user token or self-hosted admin key. Also `CAMELMAILER_API_KEY`. |
 | `--org <permalink>` | Target organization. Required on the cloud. |
 | `--server <permalink>` | Migrate only this one Postal server. |
@@ -254,6 +254,6 @@ on the `postal` database. Message data is never read.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). CamelMailer began as a ground-up Rust rewrite of
+MIT. See [LICENSE](LICENSE). Camelmailer began as a ground-up Rust rewrite of
 Postal and keeps that attribution; this tool is an independent migration
 helper.
